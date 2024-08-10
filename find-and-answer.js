@@ -7,12 +7,15 @@ const api = Axios.create({
   baseURL: "https://sou.ucs.br/api/v1/",
 });
 
-const run = async () => {
-  const { username, password } = JSON.parse(
-    fs.readFileSync("./credentials.json")
-  );
+const { username, password, webhookUrl } = JSON.parse(
+  fs.readFileSync("./credentials.json")
+);
 
+const debug = (msg) => Axios.post(webhookUrl, { content: msg });
+
+const run = async () => {
   console.log(chalk.cyan("Fetching token..."));
+  await debug("Starting script, fetching token...");
 
   const token = await api.post(
     "https://auth.ucs.br/auth-token/api-token-auth/",
@@ -23,6 +26,8 @@ const run = async () => {
   );
 
   console.log(chalk.cyan("Fetching classes..."));
+  await debug("Fetching classes...");
+
   const classes = await api.get("/ambientes/segmentos/graduacao/ambientes/", {
     headers: {
       Authorization: `Token ${token.data.token}`,
@@ -32,6 +37,7 @@ const run = async () => {
   // console.log(JSON.stringify(classes.data, null, 2));
 
   console.log(chalk.cyan("Fetching classes details..."));
+  await debug("Fetching classes details...");
   const classesDetails = await Promise.all(
     classes.data
       .flatMap((c) => c.itens)
@@ -53,6 +59,7 @@ const run = async () => {
   );
 
   console.log(chalk.cyan("Trying to find today's class..."));
+  await debug("Trying to find todays class...");
 
   // classesDetails[0].dados.encontro_hoje = {
   //   sequencia: 1,
@@ -68,11 +75,14 @@ const run = async () => {
 
   if (!todaysClass) {
     console.log(chalk.redBright("Failed to find today's class, exiting."));
+    await debug("Failed to find todays class, exiting...");
     process.exit();
   }
 
   console.log(chalk.green("Found todays class!"));
+  await debug("Found todays class!");
   const todaysClassUrl = todaysClass.class.url;
+  await debug(todaysClassUrl);
   console.log(chalk.green(todaysClassUrl));
 
   // console.log(JSON.stringify(todaysClass.dados.encontro_hoje, null, 2));
@@ -85,6 +95,12 @@ const run = async () => {
         )}...`
       )
     );
+    await debug(
+      `Checking attendence registration availability at ${moment().format(
+        "HH:mm:ss"
+      )}...`
+    );
+
     const updatedTodaysClass = await api
       .get(
         `/ambientes/segmentos/graduacao/ambientes/${todaysClassUrl}/ferramentas/registro-frequencia/`,
@@ -96,10 +112,6 @@ const run = async () => {
       )
       .then(({ data }) => data);
 
-    // console.log(
-    //   JSON.stringify(updatedTodaysClass.dados.encontro_hoje, null, 2)
-    // );
-
     if (
       updatedTodaysClass.dados.encontro_hoje?.chamada_app_hoje
         ?.liberada_para_membros
@@ -107,6 +119,8 @@ const run = async () => {
       console.log(
         chalk.cyan("Attendence registration available!! Responding now...")
       );
+
+      await debug("Attendence registration available!! Responding now...");
 
       await api.post(
         `/ambientes/segmentos/graduacao/ambientes/${todaysClassUrl}/ferramentas/registro-frequencia/`,
@@ -123,9 +137,11 @@ const run = async () => {
       console.log(
         chalk.greenBright("Sucess responding to attendence registration!")
       );
+      await debug("Sucess responding to attendence registration!!!!!")
       process.exit();
     } else
       console.log(chalk.yellowBright("Attendence registration not available."));
+      await debug("Attendence registration not available.")
   };
 
   await checkAndAnswerAttendence();
