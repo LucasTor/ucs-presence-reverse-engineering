@@ -137,15 +137,20 @@ const run = async () => {
       console.log(
         chalk.greenBright("Sucess responding to attendence registration!")
       );
-      await debug("Sucess responding to attendence registration!!!!!")
+      await debug("Sucess responding to attendence registration!!!!!");
       process.exit();
     } else
       console.log(chalk.yellowBright("Attendence registration not available."));
-      await debug("Attendence registration not available.")
+    await debug("Attendence registration not available.");
   };
 
   await checkAndAnswerAttendence();
   setInterval(() => checkAndAnswerAttendence(), 30000);
 };
+
+setTimeout(async () => {
+  await debug("Timeout reached, exiting.");
+  process.exit();
+}, 1000 * 60 * 60 * 3);
 
 run();
