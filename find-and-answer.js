@@ -152,7 +152,7 @@ const run = async () => {
     };
 
     await checkAndAnswerAttendence();
-    setInterval(() => checkAndAnswerAttendence(), 30000);
+    setInterval(() => checkAndAnswerAttendence(), 60000);
   } catch (e) {
     await debug(e.stack);
     console.error(e);
