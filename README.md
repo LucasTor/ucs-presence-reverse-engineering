@@ -4,6 +4,15 @@ This repo contains a script that was created by reverse engineering the UCS Univ
 
 It will try to find a class for today, if it finds it, it will check for the open attendence registration in the app every 30s, and if it's open it will respond and exit.
 
+## TODO:
+
+- Multiple users?
+- Better logging (aws cloudwatch?)
+- Error capturing (sentry?)
+- Queue operated (SQS?)
+- Bug when multiple classes at the same day?
+
+
 ## Deploy Updates
 
 ### 12/08/2024
@@ -14,10 +23,10 @@ A cron was setup using crontab on the OS, which runs the script everyday at 19:4
 
 ![IMG_9509](https://github.com/user-attachments/assets/88b41141-65c7-4359-b28f-64b04ae426de)
 
-TODO:
+### 14/08/2024
 
-- Multiple users?
-- Better logging (aws cloudwatch?)
-- Error capturing (sentry?)
-- Queue operated (SQS?)
-- Bug when multiple classes at the same day?
+Attempted the first project deploy, and was defeated by the fact that the univeristy network is somehow whitelisted
+
+Next attempt will be using eduroam wireless access points, which I have access to, although it might be somewhat less unreliable, the advantage is I can hide it anywhere I can get access to a power outlet.
+
+Reference: [cat.eduroam.org](https://cat.eduroam.org/)
