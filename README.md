@@ -30,3 +30,10 @@ Attempted the first project deploy, and was defeated by the fact that the univer
 Next attempt will be using eduroam wireless access points, which I have access to, although it might be somewhat less unreliable, the advantage is I can hide it anywhere I can get access to a power outlet.
 
 Reference: [cat.eduroam.org](https://cat.eduroam.org/)
+
+### ??/??/2024
+
+I made it work with eduroam using the install scripts they provide
+It responded my attendence
+Then got stolen lol
+I will try it with an ESP32 at some point in the future to make it smaller and cheaper
