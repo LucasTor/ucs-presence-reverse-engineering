@@ -16,6 +16,7 @@
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
+#include <time.h>
 
 // The WPA2-Enterprise API was renamed between arduino-esp32 core 2.x and 3.x.
 #if __has_include("esp_eap_client.h")
@@ -34,19 +35,32 @@
 static const char* TOKEN_URL = "https://auth.ucs.br/auth-token/api-token-auth/";
 static const char* API_BASE  = "https://sou.ucs.br/api/v1";
 
-// How often to poll once today's class is found, and the overall lifetime
-// guard (mirrors the 3h setTimeout in the original script).
-static const unsigned long POLL_INTERVAL_MS = 60UL * 1000UL;      // 1 min
-static const unsigned long MAX_RUNTIME_MS   = 3UL * 60UL * 60UL * 1000UL; // 3 h
+// ---- Time / NTP ----------------------------------------------------------
+// UCS is in Caxias do Sul, RS, Brazil (America/Sao_Paulo). Brazil dropped DST
+// in 2019, so it's a fixed UTC-3. POSIX TZ sign is inverted, hence "<-03>3".
+static const char* TZ_INFO    = "<-03>3";
+static const char* NTP_SERVER1 = "pool.ntp.org";
+static const char* NTP_SERVER2 = "time.google.com";
+
+// ---- Active window (local time) ------------------------------------------
+// Only look for a class and answer attendance between these times.
+static const int WINDOW_START_MIN = 19 * 60 + 30;  // 19:30
+static const int WINDOW_END_MIN   = 22 * 60 + 30;  // 22:30
+
+// ---- Timing --------------------------------------------------------------
+static const unsigned long POLL_INTERVAL_MS = 60UL * 1000UL;        // 1 min
+static const unsigned long SCAN_RETRY_MS    = 10UL * 60UL * 1000UL; // 10 min
+static const unsigned long HEARTBEAT_MS     = 60UL * 60UL * 1000UL; // 1 h
 
 // ---- Runtime state -------------------------------------------------------
 String        gToken;
 String        gTodaysClassUrl;
 long          gTodaysSequencia = -1;
-bool          gAnswered        = false;
-bool          gActive          = false;   // true once today's class is found
-unsigned long gStartedAt       = 0;
+long          gClassDay        = -1;  // day key gTodaysClassUrl is valid for
+long          gAnsweredDay      = -1;  // day key we already answered
+unsigned long gLastScan        = 0;
 unsigned long gLastPoll        = 0;
+unsigned long gLastHeartbeat   = 0;
 
 // ===========================================================================
 // Logging helpers (Serial + optional Discord webhook, like debug()/success())
@@ -156,52 +170,93 @@ void ensureWifi() {
 }
 
 // ===========================================================================
+// Time / NTP
+// ===========================================================================
+// Sync the ESP32's internal RTC from NTP. Returns true once a valid time is
+// obtained (getLocalTime fails until the clock is actually set).
+bool syncTime() {
+  Serial.println("Syncing time via NTP...");
+  configTzTime(TZ_INFO, NTP_SERVER1, NTP_SERVER2);
+  struct tm t;
+  if (getLocalTime(&t, 10000)) {  // waits up to 10s for the first sync
+    Serial.printf("Time synced: %04d-%02d-%02d %02d:%02d:%02d\n",
+                  t.tm_year + 1900, t.tm_mon + 1, t.tm_mday,
+                  t.tm_hour, t.tm_min, t.tm_sec);
+    return true;
+  }
+  Serial.println("NTP sync FAILED.");
+  return false;
+}
+
+// A stable per-day key (year*1000 + day-of-year) used to do something only
+// once per calendar day.
+long dayKey(const struct tm& t) {
+  return (long)(t.tm_year + 1900) * 1000 + t.tm_yday;
+}
+
+bool fetchToken();  // defined below; used by apiRequest() for 401 re-auth
+
+// ===========================================================================
 // HTTP helper. Returns the HTTP status code (<=0 on transport/parse failure).
 // If outDoc/filter are provided, the response body is parsed into outDoc.
+// On an authenticated 401 the token is refreshed and the request retried once
+// (the token can expire during the 24h polling window).
 // ===========================================================================
 int apiRequest(const char* method, const String& url, const String& body,
                JsonDocument* outDoc, JsonDocument* filter, bool auth) {
   ensureWifi();
 
-  WiFiClientSecure client;
-  client.setInsecure();  // Skip UCS server-cert validation (simple + reliable).
-  HTTPClient http;
-  if (!http.begin(client, url)) {
-    Serial.println("http.begin() failed for " + url);
-    return -1;
-  }
-  http.addHeader("Content-Type", "application/json");
-  if (auth) http.addHeader("Authorization", "Token " + gToken);
-
-  int code = (strcmp(method, "POST") == 0) ? http.POST(body) : http.GET();
-
-  if (code > 0) {
-    // Read the full body via getString(): HTTPClient de-chunks (and would
-    // decompress) it for us. Parsing http.getStream() directly leaves the raw
-    // Transfer-Encoding: chunked size markers in the data, which makes
-    // ArduinoJson silently parse nothing.
-    String resp = http.getString();
-#if HTTP_DEBUG
-    Serial.printf("<- HTTP %d (%u bytes): %s\n", code, (unsigned)resp.length(),
-                  resp.substring(0, 300).c_str());
-#endif
-    if (code < 400 && outDoc != nullptr) {
-      DeserializationError err = filter
-          ? deserializeJson(*outDoc, resp, DeserializationOption::Filter(*filter))
-          : deserializeJson(*outDoc, resp);
-      if (err) {
-        Serial.printf("JSON parse error (%s): %s\n", url.c_str(), err.c_str());
-        http.end();
-        return -2;
-      }
+  for (int attempt = 0; attempt < 2; attempt++) {
+    WiFiClientSecure client;
+    client.setInsecure();  // Skip UCS server-cert validation (simple + reliable).
+    HTTPClient http;
+    if (!http.begin(client, url)) {
+      Serial.println("http.begin() failed for " + url);
+      return -1;
     }
-  } else {
-    Serial.printf("HTTP %s %s failed: %s\n", method, url.c_str(),
-                  http.errorToString(code).c_str());
+    http.addHeader("Content-Type", "application/json");
+    if (auth) http.addHeader("Authorization", "Token " + gToken);
+
+    int code = (strcmp(method, "POST") == 0) ? http.POST(body) : http.GET();
+
+    // Token expired/rejected: refresh once and retry the same request.
+    if (auth && code == 401 && attempt == 0) {
+      http.end();
+      debugMsg("Token rejected (401), refreshing...");
+      if (!fetchToken()) return 401;
+      continue;
+    }
+
+    if (code > 0) {
+      // Read the full body via getString(): HTTPClient de-chunks (and would
+      // decompress) it for us. Parsing http.getStream() directly leaves the raw
+      // Transfer-Encoding: chunked size markers in the data, which makes
+      // ArduinoJson silently parse nothing.
+      String resp = http.getString();
+#if HTTP_DEBUG
+      Serial.printf("<- HTTP %d (%u bytes): %s\n", code, (unsigned)resp.length(),
+                    resp.substring(0, 300).c_str());
+#endif
+      if (code < 400 && outDoc != nullptr) {
+        DeserializationError err = filter
+            ? deserializeJson(*outDoc, resp, DeserializationOption::Filter(*filter))
+            : deserializeJson(*outDoc, resp);
+        if (err) {
+          Serial.printf("JSON parse error (%s): %s\n", url.c_str(), err.c_str());
+          http.end();
+          return -2;
+        }
+      }
+    } else {
+      Serial.printf("HTTP %s %s failed: %s\n", method, url.c_str(),
+                    http.errorToString(code).c_str());
+    }
+
+    http.end();
+    return code;
   }
 
-  http.end();
-  return code;
+  return -1;  // unreachable
 }
 
 // ===========================================================================
@@ -287,14 +342,16 @@ bool findTodaysClass(const std::vector<String>& urls) {
     }
   }
 
-  debugMsg("Failed to find today's class, exiting...");
+  debugMsg("No class found for today. Will scan again next hour.");
   return false;
 }
 
 // One poll cycle: check availability, answer if open. Mirrors
-// checkAndAnswerAttendence().
-void checkAndAnswer() {
-  debugMsg("Checking attendance registration availability...");
+// checkAndAnswerAttendence(). Returns true once attendance was answered.
+// Routine per-minute lines go to Serial only to avoid spamming Discord; the
+// meaningful events (responding / success / failures) still hit Discord.
+bool checkAndAnswer() {
+  Serial.println("Checking attendance registration availability...");
 
   JsonDocument resp;
   JsonDocument filter;
@@ -303,7 +360,7 @@ void checkAndAnswer() {
   int code = apiRequest("GET", registroUrl(gTodaysClassUrl), "", &resp, &filter, true);
   if (code != 200) {
     debugMsg("Poll request failed (HTTP " + String(code) + ").");
-    return;
+    return false;
   }
 
   bool available = resp["dados"]["encontro_hoje"]["chamada_app_hoje"]
@@ -311,8 +368,8 @@ void checkAndAnswer() {
                    false;
 
   if (!available) {
-    debugMsg("Attendance registration not available.");
-    return;
+    Serial.println("Attendance registration not available.");
+    return false;
   }
 
   debugMsg("Attendance registration available!! Responding now...");
@@ -327,10 +384,24 @@ void checkAndAnswer() {
                             nullptr, nullptr, true);
   if (postCode > 0 && postCode < 400) {
     successMsg("Success responding to attendance registration!");
-    gAnswered = true;
-  } else {
-    debugMsg("Answer POST failed (HTTP " + String(postCode) + ").");
+    return true;
   }
+  debugMsg("Answer POST failed (HTTP " + String(postCode) + ").");
+  return false;
+}
+
+// Refresh token, fetch classes, and look for today's class. On success sets
+// gTodaysClassUrl / gTodaysSequencia and returns true.
+bool findClassForToday() {
+  gLastScan = millis();
+  debugMsg("Looking for today's class...");
+
+  if (!fetchToken()) return false;
+
+  std::vector<String> urls;
+  if (!fetchClassUrls(urls) || urls.empty()) return false;
+
+  return findTodaysClass(urls);
 }
 
 // ===========================================================================
@@ -341,53 +412,71 @@ void setup() {
   delay(1000);
   Serial.println("\n=== UCS Presence (ESP32) ===");
 
-  gStartedAt = millis();
-
   if (!connectWifi()) {
     debugMsg("Could not join Wi-Fi. Will reboot in 30s to retry.");
     delay(30000);
     ESP.restart();
   }
 
-  if (!fetchToken()) {
+  if (!syncTime()) {
+    debugMsg("Could not sync time via NTP. Will reboot in 30s to retry.");
     delay(30000);
     ESP.restart();
   }
 
-  std::vector<String> urls;
-  if (!fetchClassUrls(urls) || urls.empty()) {
-    delay(30000);
-    ESP.restart();
-  }
-
-  if (!findTodaysClass(urls)) {
-    // No class today - nothing to do. Idle until the runtime guard reboots us.
-    return;
-  }
-
-  gActive = true;
-  // Do the first check immediately, like the original script.
-  checkAndAnswer();
-  gLastPoll = millis();
+  debugMsg("Device online and time-synced. Watching for the 19:30-22:30 window.");
 }
 
 void loop() {
-  // Lifetime guard - mirrors the 3h setTimeout that exits the Node script.
-  if (millis() - gStartedAt > MAX_RUNTIME_MS) {
-    debugMsg("Timeout reached, sleeping.");
-    delay(1000);
-    esp_deep_sleep_start();  // Sleep forever until power cycle / reset.
-  }
-
-  // Stop polling once we've answered or if there was no class today.
-  if (gAnswered || !gActive) {
+  struct tm t;
+  if (!getLocalTime(&t, 1000)) {
+    // RTC not valid (e.g. lost sync) - try to re-sync before doing anything.
+    Serial.println("Local time unavailable, re-syncing NTP...");
+    syncTime();
     delay(1000);
     return;
   }
 
-  if (millis() - gLastPoll >= POLL_INTERVAL_MS) {
-    checkAndAnswer();
-    gLastPoll = millis();
+  const long today  = dayKey(t);
+  const int  minutes = t.tm_hour * 60 + t.tm_min;
+  const bool inWindow = (minutes >= WINDOW_START_MIN && minutes <= WINDOW_END_MIN);
+  const unsigned long now = millis();
+
+  if (inWindow) {
+    // Already answered today? Nothing more to do until tomorrow.
+    if (gAnsweredDay == today) {
+      delay(1000);
+      return;
+    }
+
+    // Make sure we've identified today's class (retry every SCAN_RETRY_MS
+    // until found, in case attendance data appears late).
+    if (gClassDay != today &&
+        (gLastScan == 0 || now - gLastScan >= SCAN_RETRY_MS)) {
+      if (findClassForToday()) {
+        gClassDay = today;
+        gLastPoll = 0;  // poll immediately now that we found it
+      }
+    }
+
+    // Poll once a minute while we have today's class.
+    if (gClassDay == today &&
+        (gLastPoll == 0 || now - gLastPoll >= POLL_INTERVAL_MS)) {
+      if (checkAndAnswer()) {
+        gAnsweredDay = today;
+        successMsg("Done for today. Idling until tomorrow's window.");
+      }
+      gLastPoll = millis();
+    }
+  } else {
+    // Outside the window: hourly heartbeat so we know the device is alive.
+    if (gLastHeartbeat == 0 || now - gLastHeartbeat >= HEARTBEAT_MS) {
+      char buf[6];
+      snprintf(buf, sizeof(buf), "%02d:%02d", t.tm_hour, t.tm_min);
+      debugMsg(String("Heartbeat: alive at ") + buf +
+               ", outside the 19:30-22:30 window.");
+      gLastHeartbeat = millis();
+    }
   }
 
   delay(250);

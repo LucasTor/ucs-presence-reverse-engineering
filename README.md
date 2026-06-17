@@ -38,13 +38,33 @@ It responded my attendence
 Then got stolen lol
 I will try it with an ESP32 at some point in the future to make it smaller and cheaper
 
+### 17/06/2026
+
+Deployed the ESP32 version today! It connects to eduroam over WPA2-Enterprise,
+syncs its clock from NTP, and only goes active during the 19:30–22:30 window,
+pinging Discord hourly the rest of the time so I know it's alive.
+
+![ESP32 deploy](images/esp32-deploy-1.jpg)
+![ESP32 deploy](images/esp32-deploy-2.jpg)
+
 ## ESP32 port
 
 `esp32/find-and-answer/find-and-answer.ino` is a full port of the Node script
-to an ESP32. It joins **eduroam** over WPA2-Enterprise, then runs the exact same
-flow: fetch token → list classes → find today's class → poll every minute →
-answer the attendance registration as soon as it opens. Logs go to Serial and
-(optionally) the same Discord webhook.
+to an ESP32. It joins **eduroam** over WPA2-Enterprise, syncs its clock from
+NTP, and runs the same core flow: fetch token → list classes → find today's
+class → poll every minute → answer the attendance registration as soon as it
+opens. Logs go to Serial and (optionally) the same Discord webhook.
+
+It's driven by the wall clock (local time, `America/Sao_Paulo` / UTC-3):
+
+- **19:30–22:30**: look for today's class and poll once a minute to answer it.
+  Once answered, it idles until the next day's window. Re-scans every 10 min if
+  no class is found yet.
+- **Outside that window**: sends a Discord heartbeat once an hour so you know
+  the device is still alive.
+
+The window and timezone are constants at the top of the sketch
+(`WINDOW_START_MIN` / `WINDOW_END_MIN` / `TZ_INFO`), easy to tweak.
 
 ### Setup
 
@@ -69,5 +89,8 @@ answer the attendance registration as soon as it opens. Logs go to Serial and
 - If eduroam at UCS needs a specific anonymous identity or a particular EAP
   method, adjust `EAP_IDENTITY` (and the CA) accordingly — PEAP/MSCHAPv2 with
   the username login is the common default the sketch assumes.
-- The sketch reboots itself on connection/token/listing failures, and deep
-  sleeps after 3h (same lifetime guard as the original `setTimeout`).
+- The sketch reboots itself if it can't join Wi-Fi or sync NTP at boot; it
+  re-syncs NTP automatically if the clock is ever lost, and refreshes the API
+  token automatically on a 401.
+- Time uses the ESP32's internal RTC seeded from `pool.ntp.org`. Brazil has no
+  DST, so the fixed `<-03>3` timezone is correct year-round.
