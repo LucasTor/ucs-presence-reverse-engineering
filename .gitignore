@@ -1,3 +1,4 @@
 credentials.json
 node_modules
 package-lock.json
+esp32/find-and-answer/find-and-answer/secrets.h
