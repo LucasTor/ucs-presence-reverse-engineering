@@ -47,6 +47,18 @@ pinging Discord hourly the rest of the time so I know it's alive.
 ![ESP32 deploy](images/esp32-deploy-1.jpg)
 ![ESP32 deploy](images/esp32-deploy-2.jpg)
 
+**And it worked!** The Discord log shows the full run — boot at 20:26 ("Device
+online and time-synced"), finding today's class (`20262FBX5011AA`), then at
+21:12 the registration opened and it responded: *"Success responding to
+attendance registration!"* → *"Done for today. Idling until tomorrow's window."*
+
+![Discord log of a successful run](images/esp32-discord-log.jpg)
+
+The UCS app confirms it — presence registered for Cálculo Diferencial e
+Integral II on 17/06/2026: *"Você está com presença confirmada nesta aula."*
+
+![Attendance confirmed in the UCS app](images/esp32-attendance-confirmed.jpg)
+
 ## ESP32 port
 
 `esp32/find-and-answer/find-and-answer.ino` is a full port of the Node script
