@@ -61,10 +61,14 @@ Integral II on 17/06/2026: *"Você está com presença confirmada nesta aula."*
 
 ### 23/06/2026 — Have we reached Nirvana?
 
-The ESP32 board now lives inside a USB charger — it still charges devices normally while silently handling attendance. Peak inconspicuousness.
+The final form. The ESP32 now lives sealed inside a USB charger — and the
+charger still charges. Plug it into any outlet on campus and it looks like,
+and works as, a perfectly ordinary phone charger, while quietly doing its
+real job in the background. No enclosure to explain, no spare device to hide,
+nothing that reads as "computer." Peak inconspicuousness.
 
-![ESP32 board](images/charger-board.jpg)
-![Fully enclosed in charger](images/charger-enclosed.jpg)
+![The ESP32 board](images/charger-board.jpg)
+![Sealed inside the charger](images/charger-enclosed.jpg)
 
 ## ESP32 port
 
