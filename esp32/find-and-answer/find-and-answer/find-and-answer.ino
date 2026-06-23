@@ -17,6 +17,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <time.h>
+#include "esp_task_wdt.h"
 
 // The WPA2-Enterprise API was renamed between arduino-esp32 core 2.x and 3.x.
 #if __has_include("esp_eap_client.h")
@@ -52,6 +53,22 @@ static const unsigned long POLL_INTERVAL_MS = 60UL * 1000UL;        // 1 min
 static const unsigned long SCAN_RETRY_MS    = 10UL * 60UL * 1000UL; // 10 min
 static const unsigned long HEARTBEAT_MS     = 60UL * 60UL * 1000UL; // 1 h
 
+// ---- Robustness (sealed, unattended deploy) ------------------------------
+// Hardware watchdog: if loop() ever stops feeding it for this long, the chip
+// resets itself. Generous because a full class scan is several HTTP calls.
+static const uint32_t      WDT_TIMEOUT_S    = 180;                  // 3 min
+// Per-request network timeouts so a stuck socket can never hang the loop.
+static const uint16_t      HTTP_CONNECT_MS  = 10000;                // TCP connect
+static const uint16_t      HTTP_READ_MS     = 15000;                // body read
+// Self-heal: reboot once a day (only outside the active window) to clear any
+// heap fragmentation from repeated TLS and re-seed the clock. millis()-based
+// so it can't loop on the wall clock after a reboot.
+static const unsigned long MAX_UPTIME_MS    = 24UL * 60UL * 60UL * 1000UL;
+// Reboot if free heap ever drops this low (TLS leak / fragmentation guard).
+static const uint32_t      MIN_FREE_HEAP    = 25000;
+// How hard to retry Wi-Fi before giving up and rebooting.
+static const int           WIFI_RETRIES     = 3;
+
 // ---- Runtime state -------------------------------------------------------
 String        gToken;
 String        gTodaysClassUrl;
@@ -63,6 +80,34 @@ unsigned long gLastPoll        = 0;
 unsigned long gLastHeartbeat   = 0;
 
 // ===========================================================================
+// Hardware watchdog. Subscribes the loop task so a hang anywhere (a wedged
+// TLS socket, a library deadlock) triggers a chip reset instead of a brick.
+// The API changed between arduino-esp32 core 2.x and 3.x.
+// ===========================================================================
+inline void feedWatchdog() { esp_task_wdt_reset(); }
+
+void initWatchdog() {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  esp_task_wdt_config_t cfg = {
+      .timeout_ms     = WDT_TIMEOUT_S * 1000,
+      .idle_core_mask = 0,
+      .trigger_panic  = true,
+  };
+  // The arduino-esp32 3.x core auto-inits the Task WDT with a short default
+  // timeout. In that case init() returns ESP_ERR_INVALID_STATE and our 180s is
+  // silently dropped, leaving a timeout a single TLS call can blow through.
+  // Reconfigure the existing instance so our generous timeout actually applies.
+  if (esp_task_wdt_init(&cfg) == ESP_ERR_INVALID_STATE) {
+    esp_task_wdt_reconfigure(&cfg);
+  }
+#else
+  esp_task_wdt_init(WDT_TIMEOUT_S, true);
+#endif
+  esp_task_wdt_add(NULL);   // watch the task running setup()/loop().
+  feedWatchdog();
+}
+
+// ===========================================================================
 // Logging helpers (Serial + optional Discord webhook, like debug()/success())
 // ===========================================================================
 void discordPost(const String& json) {
@@ -71,6 +116,8 @@ void discordPost(const String& json) {
   client.setInsecure();
   HTTPClient http;
   if (!http.begin(client, DISCORD_WEBHOOK)) return;
+  http.setConnectTimeout(HTTP_CONNECT_MS);
+  http.setTimeout(HTTP_READ_MS);
   http.addHeader("Content-Type", "application/json");
   http.POST(json);
   http.end();
@@ -106,6 +153,7 @@ bool waitForConnection() {
   while (WiFi.status() != WL_CONNECTED && millis() - started < 30000) {
     delay(500);
     Serial.print(".");
+    feedWatchdog();
   }
   Serial.println();
 
@@ -166,7 +214,17 @@ bool connectEduroam() {
 void ensureWifi() {
   if (WiFi.status() == WL_CONNECTED) return;
   Serial.println("Wi-Fi dropped, reconnecting...");
-  connectWifi();
+  for (int i = 0; i < WIFI_RETRIES; i++) {
+    feedWatchdog();
+    if (connectWifi()) return;
+    Serial.printf("Reconnect attempt %d/%d failed.\n", i + 1, WIFI_RETRIES);
+  }
+  // Couldn't get back on the network at all: reboot and start clean. setup()
+  // will keep rebooting until Wi-Fi (and NTP) come back, which is the only
+  // sane behaviour for a sealed device with no console.
+  Serial.println("Wi-Fi unrecoverable, rebooting.");
+  delay(500);
+  ESP.restart();
 }
 
 // ===========================================================================
@@ -214,6 +272,8 @@ int apiRequest(const char* method, const String& url, const String& body,
       Serial.println("http.begin() failed for " + url);
       return -1;
     }
+    http.setConnectTimeout(HTTP_CONNECT_MS);
+    http.setTimeout(HTTP_READ_MS);
     http.addHeader("Content-Type", "application/json");
     if (auth) http.addHeader("Authorization", "Token " + gToken);
 
@@ -325,6 +385,7 @@ bool findTodaysClass(const std::vector<String>& urls) {
   debugMsg("Trying to find today's class...");
 
   for (const String& classUrl : urls) {
+    feedWatchdog();
     JsonDocument resp;
     JsonDocument filter;
     filter["dados"]["encontro_hoje"] = true;
@@ -404,6 +465,24 @@ bool findClassForToday() {
   return findTodaysClass(urls);
 }
 
+// Human-readable reason the chip last reset, so the boot heartbeat can tell a
+// manual power-cycle apart from a self-reboot (watchdog, low heap, daily) or a
+// brownout (a power-supply problem worth knowing about in a sealed box).
+const char* resetReasonStr() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_EXT:       return "external pin";
+    case ESP_RST_SW:        return "software (self-reboot)";
+    case ESP_RST_PANIC:     return "panic/crash";
+    case ESP_RST_INT_WDT:   return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:  return "task watchdog (hang)";
+    case ESP_RST_WDT:       return "watchdog";
+    case ESP_RST_BROWNOUT:  return "brownout (power dip)";
+    case ESP_RST_DEEPSLEEP: return "deep sleep wake";
+    default:                return "unknown";
+  }
+}
+
 // ===========================================================================
 // Arduino entry points
 // ===========================================================================
@@ -411,27 +490,45 @@ void setup() {
   Serial.begin(115200);
   delay(1000);
   Serial.println("\n=== UCS Presence (ESP32) ===");
+  Serial.printf("Reset reason: %d, free heap: %u\n",
+                (int)esp_reset_reason(), (unsigned)ESP.getFreeHeap());
+
+  initWatchdog();
+
+  // Don't wear out flash writing the SSID every boot, and let the core retry
+  // the association on its own between our explicit reconnects.
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(true);
 
   if (!connectWifi()) {
     debugMsg("Could not join Wi-Fi. Will reboot in 30s to retry.");
+    feedWatchdog();
     delay(30000);
     ESP.restart();
   }
+  feedWatchdog();
 
   if (!syncTime()) {
     debugMsg("Could not sync time via NTP. Will reboot in 30s to retry.");
+    feedWatchdog();
     delay(30000);
     ESP.restart();
   }
+  feedWatchdog();
 
-  debugMsg("Device online and time-synced. Watching for the 19:30-22:30 window.");
+  debugMsg(String("Device online and time-synced (reset: ") + resetReasonStr() +
+           "). Watching for the 19:30-22:30 window.");
 }
 
 void loop() {
+  feedWatchdog();
+
   struct tm t;
   if (!getLocalTime(&t, 1000)) {
-    // RTC not valid (e.g. lost sync) - try to re-sync before doing anything.
+    // RTC not valid (e.g. lost sync) - get back online, then re-sync before
+    // doing anything that depends on the wall clock.
     Serial.println("Local time unavailable, re-syncing NTP...");
+    ensureWifi();
     syncTime();
     delay(1000);
     return;
@@ -441,6 +538,24 @@ void loop() {
   const int  minutes = t.tm_hour * 60 + t.tm_min;
   const bool inWindow = (minutes >= WINDOW_START_MIN && minutes <= WINDOW_END_MIN);
   const unsigned long now = millis();
+
+  // ---- Self-heal guards (never interrupt the active answering window) ----
+  if (!inWindow) {
+    // Critically low heap: bail out and come back fresh before we crash mid-run.
+    if (ESP.getFreeHeap() < MIN_FREE_HEAP) {
+      debugMsg("Free heap low (" + String((unsigned)ESP.getFreeHeap()) +
+               " bytes), rebooting to recover.");
+      delay(500);
+      ESP.restart();
+    }
+    // Routine once-a-day reboot to shed TLS fragmentation and re-seed the clock.
+    // millis()-based, so it resets after the reboot and can never loop.
+    if (now >= MAX_UPTIME_MS) {
+      debugMsg("Scheduled daily reboot (clears memory, re-syncs clock).");
+      delay(500);
+      ESP.restart();
+    }
+  }
 
   if (inWindow) {
     // Already answered today? Nothing more to do until tomorrow.
@@ -474,7 +589,8 @@ void loop() {
       char buf[6];
       snprintf(buf, sizeof(buf), "%02d:%02d", t.tm_hour, t.tm_min);
       debugMsg(String("Heartbeat: alive at ") + buf +
-               ", outside the 19:30-22:30 window.");
+               ", outside the 19:30-22:30 window. Free heap: " +
+               String((unsigned)ESP.getFreeHeap()) + " bytes.");
       gLastHeartbeat = millis();
     }
   }

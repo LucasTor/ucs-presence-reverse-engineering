@@ -59,6 +59,13 @@ Integral II on 17/06/2026: *"Você está com presença confirmada nesta aula."*
 
 ![Attendance confirmed in the UCS app](images/esp32-attendance-confirmed.jpg)
 
+### 23/06/2026 — Have we reached Nirvana?
+
+The ESP32 board now lives inside a USB charger — it still charges devices normally while silently handling attendance. Peak inconspicuousness.
+
+![ESP32 board](images/charger-board.jpg)
+![Fully enclosed in charger](images/charger-enclosed.jpg)
+
 ## ESP32 port
 
 `esp32/find-and-answer/find-and-answer.ino` is a full port of the Node script
@@ -104,5 +111,11 @@ The window and timezone are constants at the top of the sketch
 - The sketch reboots itself if it can't join Wi-Fi or sync NTP at boot; it
   re-syncs NTP automatically if the clock is ever lost, and refreshes the API
   token automatically on a 401.
+- Built to run sealed and unattended: a hardware watchdog resets the chip if
+  the loop ever hangs, every network call has a hard timeout, Wi-Fi loss
+  triggers bounded reconnect attempts then a reboot, it reboots if free heap
+  runs low, and it does a routine once-a-day reboot (outside the active
+  window) to shed any TLS heap fragmentation and re-seed the clock. The hourly
+  heartbeat reports free heap so a slow leak is visible in the Discord log.
 - Time uses the ESP32's internal RTC seeded from `pool.ntp.org`. Brazil has no
   DST, so the fixed `<-03>3` timezone is correct year-round.
