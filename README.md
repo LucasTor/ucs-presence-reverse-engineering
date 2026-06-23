@@ -1,8 +1,8 @@
 # UCS Presence App Reverse Engineering
 
-This repo contains a script that was created by reverse engineering the UCS University mobile app, to fetch their classes data APIs, and respond to the attendence registration.
+This repo contains a script that was created by reverse engineering the UCS University mobile app, to fetch their classes data APIs, and respond to the attendence registration, so that I can attend class without the inconvenience of attending class.
 
-It will try to find a class for today, if it finds it, it will check for the open attendence registration in the app every 30s, and if it's open it will respond and exit.
+It will try to find a class for today, if it finds it, it will check for the open attendence registration in the app every 30s, and if it's open it will respond and exit. A perfect, diligent student that is never actually in the room.
 
 ## TODO:
 
@@ -17,32 +17,37 @@ It will try to find a class for today, if it finds it, it will check for the ope
 
 ### 12/08/2024
 
-Hardware is all set up and configured, the brains of the operation is an Orange Pi PC, which will be connected via wired ethernet to the university network. I also added a physical serial interface, which can be accessed using an USB to Serial adapter, to open the linux shell, as the university network is very complex and I doubt I'll be able to get a SSH connection to the device reliably.
+Hardware is all set up and configured, the brains of the operation is an Orange Pi PC. Naturally, attending class remotely required more compute than attending it in person. It will be connected via wired ethernet to the university network. I also added a physical serial interface, which can be accessed using an USB to Serial adapter, to open the linux shell, as the university network is very complex and I doubt I'll be able to get a SSH connection to the device reliably. (Foreshadowing.)
 
-A cron was setup using crontab on the OS, which runs the script everyday at 19:40
+A cron was setup using crontab on the OS, which runs the script everyday at 19:40, more reliable than I have ever been about showing up at 19:40.
 
 ![IMG_9509](https://github.com/user-attachments/assets/88b41141-65c7-4359-b28f-64b04ae426de)
 
 ### 14/08/2024
 
-Attempted the first project deploy, and was defeated by the fact that the univeristy network is somehow whitelisted
+Attempted the first project deploy, and was defeated by the fact that the univeristy network is somehow whitelisted. The one time the IT department does its job properly, and it's against me.
 
-Next attempt will be using eduroam wireless access points, which I have access to, although it might be somewhat less unreliable, the advantage is I can hide it anywhere I can get access to a power outlet.
+Next attempt will be using eduroam wireless access points, which I have access to, although it might be somewhat less unreliable, the advantage is I can hide it anywhere I can get access to a power outlet. The bar has officially moved from "make it work" to "make it disappear."
 
 Reference: [cat.eduroam.org](https://cat.eduroam.org/)
 
-### ??/??/2024
+### 28/08/2024
 
 I made it work with eduroam using the install scripts they provide
 It responded my attendence
-Then got stolen lol
-I will try it with an ESP32 at some point in the future to make it smaller and cheaper
+Then got stolen lol. Turns out the only thing more effective than my attendance tracker was someone else's. Truly the most inconspicuous the device has ever been: gone.
+I will try it with an ESP32 at some point in the future to make it smaller and cheaper, and ideally less appealing to thieves
 
 ### 17/06/2026
 
+The point in the future finally arrived, only about two years late, which by
+my own attendance standards is basically punctual.
+
 Deployed the ESP32 version today! It connects to eduroam over WPA2-Enterprise,
 syncs its clock from NTP, and only goes active during the 19:30–22:30 window,
-pinging Discord hourly the rest of the time so I know it's alive.
+pinging Discord hourly the rest of the time so I know it's alive. The amount of
+engineering invested in not walking to a classroom is, at this point, its own
+form of dedication.
 
 ![ESP32 deploy](images/esp32-deploy-1.jpg)
 ![ESP32 deploy](images/esp32-deploy-2.jpg)
@@ -61,11 +66,14 @@ Integral II on 17/06/2026: *"Você está com presença confirmada nesta aula."*
 
 ### 23/06/2026 — Have we reached Nirvana?
 
-The final form. The ESP32 now lives sealed inside a USB charger — and the
-charger still charges. Plug it into any outlet on campus and it looks like,
-and works as, a perfectly ordinary phone charger, while quietly doing its
-real job in the background. No enclosure to explain, no spare device to hide,
-nothing that reads as "computer." Peak inconspicuousness.
+The final form. The ESP32 now lives sealed inside a USB charger, and in a
+twist nobody asked for, the charger still charges. Plug it into any outlet on
+campus and it looks like, and works as, a perfectly ordinary phone charger,
+while quietly doing the one thing I refuse to do myself. No enclosure to
+explain, no spare device to hide, nothing that reads as "computer," and most
+importantly, nothing worth stealing. It only took a stolen Orange Pi, two
+years, and an entire embedded firmware project to confidently not show up to a
+class I'm paying to attend. Peak inconspicuousness.
 
 ![The ESP32 board](images/charger-board.jpg)
 ![Sealed inside the charger](images/charger-enclosed.jpg)
